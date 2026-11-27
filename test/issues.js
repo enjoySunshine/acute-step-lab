@@ -1,5 +1,6 @@
 import * as fontkit from 'fontkit';
 import assert from 'assert';
+import fs from 'node:fs';
 import * as r from 'restructure';
 
 describe('issues', function () {
@@ -276,6 +277,101 @@ describe('issues', function () {
           'gt.below.quiet',
         ],
       );
+    });
+  });
+
+  describe('missing horizontal metrics table', function () {
+    // Returns a copy of a TTF buffer whose hmtx directory record has been
+    // removed. The table bytes stay in the file, but the font no longer knows
+    // it has horizontal metrics.
+    function withoutHmtx(buffer) {
+      let copy = Buffer.from(buffer);
+      let numTables = copy.readUInt16BE(4);
+      let entries = [];
+      for (let i = 0; i < numTables; i++) {
+        let pos = 12 + i * 16;
+        let tag = copy.toString('latin1', pos, pos + 4);
+        entries.push({
+          tag,
+          checksum: copy.readUInt32BE(pos + 4),
+          offset: copy.readUInt32BE(pos + 8),
+          length: copy.readUInt32BE(pos + 12),
+        });
+      }
+
+      let kept = entries.filter((entry) => entry.tag !== 'hmtx');
+      copy.writeUInt16BE(kept.length, 4);
+      kept.forEach((entry, i) => {
+        let pos = 12 + i * 16;
+        copy.write(entry.tag, pos, 4, 'latin1');
+        copy.writeUInt32BE(entry.checksum, pos + 4);
+        copy.writeUInt32BE(entry.offset, pos + 8);
+        copy.writeUInt32BE(entry.length, pos + 12);
+      });
+      copy.fill(0, 12 + kept.length * 16, 12 + numTables * 16);
+      return copy;
+    }
+
+    let openFont = () =>
+      fontkit.openSync(
+        new URL('data/OpenSans/OpenSans-Regular.ttf', import.meta.url),
+      );
+
+    it('reads the recorded advance without losing the outline', function () {
+      let font = openFont();
+      let accented = font.glyphForCodePoint(0xc0); // À
+      let plain = font.glyphForCodePoint(0x41); // A
+
+      // The advance comes from hmtx, while the outline (contours and top) is
+      // read independently from glyf.
+      let expectedAdvance = accented.advanceWidth;
+      assert.strictEqual(plain.advanceWidth, expectedAdvance);
+      assert.ok(
+        accented.path.toSVG().split('M').length - 1 >
+          plain.path.toSVG().split('M').length - 1,
+      );
+      assert.ok(accented.bbox.maxY > plain.bbox.maxY);
+
+      // Laying out both glyphs positions the second one after the first's
+      // recorded advance, rather than at 0 or on top of the first glyph.
+      let run = font.layout('ÀA');
+      assert.strictEqual(run.positions[0].xAdvance, expectedAdvance);
+      assert.strictEqual(run.positions[1].xAdvance, expectedAdvance);
+      assert.strictEqual(run.advanceWidth, expectedAdvance * 2);
+    });
+
+    it('does not throw when the hmtx table is missing', function () {
+      let buffer = withoutHmtx(
+        fs.readFileSync(
+          new URL('data/OpenSans/OpenSans-Regular.ttf', import.meta.url),
+        ),
+      );
+      let font = fontkit.create(buffer);
+      assert.strictEqual(font.hmtx, undefined);
+
+      let accented = font.glyphForCodePoint(0xc0); // À
+      let plain = font.glyphForCodePoint(0x41); // A
+
+      // Reading the advance must not throw; with no metrics table there is no
+      // recorded value, so the advance falls back to zero.
+      assert.doesNotThrow(() => accented.advanceWidth);
+      assert.strictEqual(accented.advanceWidth, 0);
+      assert.strictEqual(plain.advanceWidth, 0);
+
+      // The outline is untouched: the accent is still there.
+      assert.ok(
+        accented.path.toSVG().split('M').length - 1 >
+          plain.path.toSVG().split('M').length - 1,
+      );
+      assert.ok(accented.bbox.maxY > plain.bbox.maxY);
+
+      // Layout still runs end to end and returns a position for every glyph.
+      let run;
+      assert.doesNotThrow(() => {
+        run = font.layout('ÀA');
+      });
+      assert.strictEqual(run.glyphs.length, 2);
+      assert.strictEqual(run.positions.length, 2);
     });
   });
 

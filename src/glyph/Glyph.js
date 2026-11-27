@@ -46,6 +46,13 @@ export default class Glyph {
   }
 
   _getTableMetrics(table) {
+    // A font may omit its horizontal or vertical metrics table. Without one
+    // there is no recorded advance or side bearing to read, so fall back to
+    // zeros instead of throwing, the same way a missing vmtx table is handled.
+    if (!table) {
+      return { advance: 0, bearing: 0 };
+    }
+
     if (this.id < table.metrics.length) {
       return table.metrics.get(this.id);
     }
